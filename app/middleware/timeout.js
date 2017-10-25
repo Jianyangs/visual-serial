@@ -11,20 +11,20 @@ function TIMEOUT() {
     if (id !== null) {
       clearTimeout(id);
       id = null;
-    }    
+    }
     
     bufArray.push(buf);
     totalByteCount += buf.length;
 
     if (totalByteCount > 10240) {
-      next(Buffer.concat(bufArray, totalByteCount));
+      next(Buffer.concat(bufArray, totalByteCount), serial);
       bufArray.length = 0;
       totalByteCount = 0;
     }
     else {
       id = setTimeout(()=>{
         id = null;
-        next(Buffer.concat(bufArray, totalByteCount));
+        next(Buffer.concat(bufArray, totalByteCount), serial);
         bufArray.length = 0;
         totalByteCount = 0;
       }, timeoutValue);
@@ -34,7 +34,7 @@ function TIMEOUT() {
     return [
       {
         name: 'timeoutValue', label: '超时时间(ms)', type: 'select', 
-        values: valuesList, currentValue: timeoutValue, 
+        values: valuesList, 
       },
     ];
   }
@@ -44,10 +44,16 @@ function TIMEOUT() {
       timeoutValue = parseInt(n, 10);
     }
   }
+  function getConfig() {
+    return {
+      timeoutValue,
+    }
+  }
   return {
     entry,
     getOptions,
     config,
+    getConfig,
   }
 }
 TIMEOUT.type = 'middleware';

@@ -1,5 +1,5 @@
-.titlebar * {
-  box-sizing: content-box;
+* {
+  word-break: break-all;
 }
 
 body {
@@ -9,9 +9,7 @@ body {
   height: 100%;
   max-height: 100%;
 }
-textarea {
-  resize: none;
-}
+
 #sidebar {
   display: flex;
   flex-direction: column;
@@ -83,16 +81,20 @@ footer span:not(:last-child):after {
   flex-direction: row;
   align-items: center;
   height: auto;
+  margin: 2px;
 }
+
 #rx-content {
   display: flex;
   flex: 1;
   flex-direction: column;
 }
+textarea {
+  resize: none;
+  background-color: #FFF;
+}
 #tx-content > textarea {
-  background-color: #F5F4F5;
   flex: 1;
-  color: #007700;
   border: 0;
   border-top: 1px solid #c2c0c2;
   border-bottom: 1px solid #c2c0c2;
@@ -119,6 +121,7 @@ footer span:not(:last-child):after {
   padding: 0;
   border-bottom: 1px solid #c2c0c2;
   background-image: linear-gradient(to bottom, #e8e6e8 0, #d1cfd1 100%);
+  word-break: break-all;
 }
 #display-list {
   overflow-y: scroll;
@@ -133,10 +136,15 @@ footer span:not(:last-child):after {
   margin-left: 5px;
   margin-bottom: 0;
 }
+#btn-loopback {
+  width: 78px;
+  margin-left: auto;
+}
 #btn-send-data {
   width: 80px;
   margin-left: 5px;
 }
+
 .middleware-line:first-child {
   border-top: 1px solid #c2c0c2;
 }
@@ -233,7 +241,11 @@ label {
 .popup .footer button:first-child {
   margin-left: auto;
 }
-
+#middleware-options input[type="radio"],
+#middleware-options input[type="checkbox"] {
+  margin-left: 2px;
+  margin-right: 5px;
+}
 #display-list > p {
   cursor: copy;
 }
@@ -248,3 +260,6 @@ label {
   cursor: pointer;
 }
 
+button[disabled] {
+  cursor: not-allowed;
+}

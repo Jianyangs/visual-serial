@@ -9,18 +9,8 @@ const SerialPort = require('serialport');
 const _ = require('lodash/fp');
 const R = require('ramda');
 const cuid = require('cuid');
-const remote = require('electron').remote;
-const ipcMain = remote.ipcMain;
-const BrowserWindow = require('electron').remote.BrowserWindow
-const { clipboard } = require('electron');
-
-
-// ipcMain.on('serial-txdata', (event, data) => {
-//   if (externWins.has(event.sender)) {
-//     console.log('has this win');
-//   }
-//   console.log(data);
-// });
+const { ipcMain, dialog, BrowserWindow } = require('electron').remote;
+const { clipboard, shell } = require('electron');
 
 // 全局变量
 let serial = null; // 串口实例
@@ -32,11 +22,13 @@ const dataObj = {
   protocolStr: '',
   itemCnt: 0,
   totalRxCnt: 0,
+  totalTxCnt: 0,
 }
 const hexTab = "0123456789ABCDEF";
 let rxTextArea;
 let rxHandlerSeq; // 接收处理序列
 let txHandlerSeq; // 发送处理序列
+let loopbackSeq; // loopback
 let tempMiddlewareInstance = null; // 当前正在编辑修改的中间件
 const middlewareFactoryMap = new Map();
 const preMiddlewareInstanceMap = new Map();
@@ -52,14 +44,7 @@ function basicSetupFormInit() {
   const stopBits = [1,2];
   const parities = ['none', 'even', 'odd', 'mark', 'space'];
   const flowControls = ['无', 'RTS/CTS', 'XON/XOFF'];  
-  // 获取串口名称
-  initSerialList(ports=>{
-    const $devNames = $('#device-name-select');
-    $devNames.empty();
-    _.map(v=>{
-      $devNames.append($(`<option>${v}</option>`));
-    }, ports);
-  });
+  refreshSerialList();
   // 初始化默认波特率
   // 初始化停止位
   // 初始化校验位
@@ -73,16 +58,31 @@ function basicSetupFormInit() {
     }, a[0]);
   }, _.zip(arrs, basicSetupSelectors));
 }
+// 刷新串口设备
+function refreshSerialList() {
+  // 添加串口名称
+  initSerialList(ports=>{
+    const $devNames = $('#device-name-select');
+    $devNames.empty();
+    _.map(v=>{
+      $devNames.append($(`<option>${v}</option>`));
+    }, ports);
+  });
+}
 // 获取串口列表
 function initSerialList(cb) {
-  SerialPort.list()
-  .then(ports=>{
-    const names = ports.map(p=>p.comName);
-    if(typeof cb === 'function') {
-      cb(names);
+  SerialPort.list((err, ports) =>
+    {
+      if (err) {
+        console.log(err);
+        return;
+      }
+      const names = ports.map(p=>p.comName);
+      if(typeof cb === 'function') {
+        cb(names);
+      }
     }
-  }) 
-  .catch(err=>console.log(err));
+  );
 }
 function getBasicOptions() {
   const selectors = _.concat('device-name-select', basicSetupSelectors);
@@ -112,6 +112,21 @@ function getBasicOptions() {
   }
   return options;
 }
+//
+function updateDOMSerialChange(open = true) {
+  if (open) {
+    $('#btn-open').text('关闭').addClass('btn-positive')
+      .removeClass('btn-default').removeClass('btn-warning').prop('disabled', false);
+    $('#btn-send-data').addClass('btn-primary')
+      .removeClass('btn-default').prop('disabled',false);
+  }
+  else {
+    $('#btn-open').text('打开').addClass('btn-default')
+      .removeClass('btn-positive').removeClass('btn-warning').prop('disabled', false);
+    $('#btn-send-data').addClass('btn-default')
+      .removeClass('btn-primary').prop('disabled', true);
+  }
+}
 // 打开/关闭串口操作
 function handleOpenClick(e) {
   const $btn = $(e.target);
@@ -129,24 +144,25 @@ function handleOpenClick(e) {
     serial.open(err=>{
       if(err) {
         console.log('open serial port failed!', err);
+        updateDOMSerialChange(false);
+        serial = null;
+        refreshSerialList();
       }
     });
     serial.on('data', handleSerialRecieveData);
     serial.on('error', handleSerialError);
     serial.on('open', ()=>{
-      $btn.removeClass('btn-warning').removeClass('btn-default').addClass('btn-positive').html('关闭');
-      $btn.prop('disabled', false);
+      updateDOMSerialChange(true);
     });
     serial.on('close', ()=>{
-      $btn.removeClass('btn-warning').removeClass('btn-positive').addClass('btn-default').html('打开');
-      $btn.prop('disabled', false);
+      updateDOMSerialChange(false);
       serial = null;
     });
-
-    applyMiddleware();
   }
 }
-
+ipcMain.on('serial-txdata', (event, data) => {
+  txHandlerSeq(buf, serial);
+});
 function handleSerialRecieveData(buf) {
   rxHandlerSeq(buf, serial);
 }
@@ -155,9 +171,11 @@ function handleSerialError(err) {
 }
 // 基本设置栏 事件处理初始化
 function basicSetupEventInit() {
-  const $openButton = $('#open-device');
-  $openButton.click(function(e){
+  $('#btn-open').click(function(e){
     handleOpenClick(e);
+  });
+  $('#refresh-device').click(e => {
+    refreshSerialList();
   });
 }
 // 基本设置栏设置入口
@@ -193,8 +211,7 @@ function bufFromHex(input) {
     return null;
   }
   const str = input.toLowerCase().replace(/0x/g, ' ').replace(/[^0-9a-f ]/g, ' ').trim().replace(/\s{2,}/g, ' ');
-  const match = /^0-9a-f /g.test(str); // 匹配0-9a-f和空格之外的字符，如果匹配，说明含有不能解析的字符
-  if (match || str === '') return null;
+  if (str === '') return null;
   const m = R.map(v=>{
     if (v.length < 3) return v;
     else {
@@ -222,9 +239,9 @@ function display(buf, devObj, next) {
     dataObj.rawStr += buf.toString('utf8');
     rxTextArea.innerHTML = dataObj.rawStr;
     rxTextArea.scrollTop = rxTextArea.scrollHeight;
-  } else if (display.format === 'PROTOCOL-HEX' || display.format === 'PROTOCOL-STRING') {
+  } else if (display.format === 'ITEM-HEX' || display.format === 'ITEM-STRING') {
     let str = '';
-    if (display.format === 'PROTOCOL-HEX') {
+    if (display.format === 'ITEM-HEX') {
       for(i=0; i < buf.length; i++) {
         str += byteToHex(buf[i]);
         str += ' ';
@@ -244,7 +261,10 @@ function display(buf, devObj, next) {
     dataObj.itemCnt += 1;
     var area = $('#display-list')[0];
     area.scrollTop = area.scrollHeight;
-  } 
+  } if (display.format === 'NOT-DISPLAY') {
+    next(buf, devObj);
+    return;
+  }
   
   statusbarSet('rxItemCount', `${dataObj.itemCnt}`);
   statusbarSet('rxByteCount', `${dataObj.totalRxCnt}`)
@@ -253,14 +273,43 @@ function display(buf, devObj, next) {
 display.format = 'RAW-HEX';
 // 发送数据函数
 function sendLast(buf, serial, next) {
-  serial.write(buf);
+  if (serial.isOpen) {
+    serial.write(buf);
+    dataObj.totalTxCnt += buf.length;
+    statusbarSet('txByteCount', dataObj.totalTxCnt);
+  }
+}
+// loopback function
+function loopback(buf, serial, next) {
+  rxHandlerSeq(buf, serial);
+}
+
+function getBufFromTxContent() {
+  let buf;
+  const insertRetrun = document.getElementById('insert-return').checked;
+  const isHex = document.getElementById('send-hex').checked;
+  const isDec = document.getElementById('send-decimal').checked;
+  let str = $('#tx-content textarea').val();
+  if (!isHex && !isDec) { // 直接发送字符串
+    if (insertRetrun) { str = str.replace(/\n/g, '\r\n'); }
+    buf = Buffer.from(str, 'utf8');
+  } else if (isHex) {
+    buf = bufFromHex(str);
+    if(!buf) return null;
+  } else if (isDec) { // to be complete
+
+  }
+  if (buf === undefined || buf.length === 0) return null;
+  return buf;
 }
 
 function DOMEventInit() {
   // display format change event
   $('#display-format-select').change(function(e) {
     display.format = $(this).val();
-    // console.log(display.format);
+
+    if (display.format === 'NOT-DISPLAY') return;
+
     if (display.format.substring(0, 3) !== 'RAW') {
       $('#textarea-rx').hide();
       $('#display-list').show();
@@ -295,6 +344,7 @@ function DOMEventInit() {
         const cuid = e.target.previousElementSibling.dataset['cuid'];
         middlewareDoModal(cuid);
       }
+      applyMiddleware();
     }
   });
 
@@ -318,17 +368,13 @@ function DOMEventInit() {
     middlewareDoModal();
   });
 
-  // 中间件弹出框”确定“按钮 单击事件处理程序
+  // 中间件弹出框"确定"按钮 单击事件处理程序
   $('#middleware-popup .ok').click(e => {
     const operation = document.getElementById('middleware-popup').dataset['operation'];
     
     // 收集配置信息并配置
-    const options = document.querySelectorAll('#middleware-options [name]');
-    const conf = {};
-    for(let i=0; i<options.length; i++) {
-      const elm = options[i];
-      conf[elm.getAttribute('name')] = elm.value;
-    }
+    const conf = getMiddlewareOptions();
+
     if (typeof tempMiddlewareInstance.config === 'function') {
       tempMiddlewareInstance.config(conf);
     }
@@ -355,14 +401,14 @@ function DOMEventInit() {
         obj.name = tempMiddlewareInstance.name;
         obj.type = tempMiddlewareInstance.type;
 
-        const modalPath = path.join('file://', __dirname, tempMiddlewareInstance.path);
-        let win = new BrowserWindow({frame: false})
+        const modalPath = path.join('file://', tempMiddlewareInstance.path);
+        let win = new BrowserWindow();
         win.on('close', function () { obj.win = null; deleteInstanceByCuid(obj.cuid, true); })
         win.loadURL(modalPath)
         win.show();
 
         obj.win = win;
-        const entry = function (buf, serial, next) { this.win.webContents.send('serial-rxdata', buf); next(buf);};
+        const entry = function (buf, serial, next) { this.win.webContents.send('serial-rxdata', buf); next(buf, serial);};
         obj.entry = entry.bind(obj);
         mapEditing.set(obj.cuid, obj);
 
@@ -383,9 +429,11 @@ function DOMEventInit() {
     }
     $('#shadow-mask').hide();
     $('#middleware-popup').hide();
+    applyMiddleware();
   });
   // 中间件弹出框取消按钮处理程序
   $('#middleware-popup .cancel').click(e => {
+    $('.list-editing').removeClass('list-editing');
     $('#shadow-mask').hide();
     $('#middleware-popup').hide();
   });
@@ -394,10 +442,11 @@ function DOMEventInit() {
     if (e.target.tagName === 'P') {
       clipboard.writeText(e.target.innerHTML);
     }
-  })
+  });
   // 清空接收缓冲区和显示区域
   $('#rx-clear').click(e => {
     dataObj.totalRxCnt = 0;
+    dataObj.totalTxCnt = 0;
     dataObj.itemCnt = 0;
     dataObj.rawHex = '';
     dataObj.rawStr = '';
@@ -408,21 +457,17 @@ function DOMEventInit() {
   // send button 发送按钮click事件处理函数
   $('#btn-send-data').click(e => {
     if (serial && serial.isOpen) {
-      let buf;
-      const insertRetrun = document.getElementById('insert-return').checked;
-      const isHex = document.getElementById('send-hex').checked;
-      const isDec = document.getElementById('send-decimal').checked;
-      let str = $('#tx-content textarea').val();
-      if (!isHex && !isDec) { // 直接发送字符串
-        if (insertRetrun) { str = str.replace(/\n/g, '\r\n'); }
-        buf = Buffer.from(str, 'utf8');
-      } else if (isHex) {
-        buf = bufFromHex(str);
-        if(!buf) return;
-      } else if (isDec) { // to be complete
-
+      const buf = getBufFromTxContent();
+      if (buf) {
+        txHandlerSeq(buf, serial);
       }
-      txHandlerSeq(buf, serial);
+    }
+  });
+  // loopback button click event
+  $('#btn-loopback').click(e => {
+    const buf = getBufFromTxContent();
+    if (buf) {
+      loopbackSeq(buf, serial);
     }
   });
   // 发送选项设置
@@ -432,22 +477,19 @@ function DOMEventInit() {
     } else if (e.target.id === 'send-decimal' && e.target.checked) {
       $('#send-hex')[0].checked = false;
     }
-  })
-}
-
-// window / document 全局事件
-document.addEventListener('DOMContentLoaded', function () {
-  $('.titlebar-close').click(e=>{
-    window.close();
   });
-  rxTextArea = document.querySelector('#textarea-rx');
-  basicSetupInit();
-  DOMEventInit();
-  let height = window.innerHeight - 160 - 24 - 10 - 44;
-  $('#rx-display-area').css('height', height);
-
-  importMiddleware();
-});
+  function setRTSDTR(pin, e) {
+    const rtsChecked = document.getElementById('set-rts').checked;
+    const dtrChecked = document.getElementById('set-dtr').checked;
+    if (serial && serial.isOpen) {
+      serial.set({rts: rtsChecked, dtr: dtrChecked,});
+    } else {
+      e.preventDefault();
+    }
+  }
+  document.getElementById('set-rts').addEventListener('click', setRTSDTR.bind(null, 'rts'));
+  document.getElementById('set-dtr').addEventListener('click', setRTSDTR.bind(null, 'dtr'));
+}
 
 // 消息提示
 function showMessage(title='Message', content='') {
@@ -491,11 +533,12 @@ function scanMiddlewareDir(dirname) {
 }
 // import middleware => [mwConstructor1, Constructor2...]
 function importMiddleware() {
+  const middlewareDir = path.join(__dirname, 'middleware');
   // middlewareFactoryMap
-  const mws = scanMiddlewareDir('./middleware');
+  const mws = scanMiddlewareDir(middlewareDir);
   const cons = _.map(v => {
     if (v.type === 'js') {
-      const factory = require('./' + path.join('./middleware', v.name));
+      const factory = require('./'+path.join('middleware', v.name));
       return {
         factory,
         name: path.basename(v.name, path.extname(v.name)),
@@ -504,7 +547,7 @@ function importMiddleware() {
     }
     else if (v.type === 'dir') {
       return {
-        path: path.join('./middleware', v.name, 'index.html'),
+        path: path.join(middlewareDir, v.name, 'index.html'),
         name: v.name,
         type: 'widget',
       }
@@ -514,9 +557,40 @@ function importMiddleware() {
     middlewareFactoryMap.set(o.name, o);
   }, cons);
 }
-
+// getMiddlewareOptions
+function getMiddlewareOptions() {
+  const optionsContainer = document.getElementById('middleware-options');
+  const namedOptions = optionsContainer.querySelectorAll('[name]');
+  const arr = Array.from(namedOptions);
+  const config = {};
+  R.map(e => {
+    if (e.tagName === 'INPUT') {
+      if (e.type === 'radio') {
+        if (e.checked) {
+          config[e.name] = e.value;
+        }
+      } else if (e.type === 'checkbox') {
+        var arr = config[e.name] || [];
+        if (e.checked) {
+          arr.push(e.value);
+        }
+        // 必须要在if外面赋值，否则，一个都没选的话，config[e.name]就会是undefined
+        config[e.name] = arr;
+      } else {
+        config[e.name] = e.value;
+      }
+    } else if (e.tagName === 'BUTTON') {
+      if (e.dataset['type'] === 'savefile') {
+        config[e.name] = e.dataset['value'];
+      }
+    } else if (e.tagName === 'SELECT') {
+      config[e.name] = e.value;
+    }
+  })(arr);
+  return config;
+}
 // 添加中间件的选项，给定中间件的名字，显示中间件的选项
-function addOptions(name, inst = null) {
+function addMiddlewareOptions(name, inst = null) {
   // clear previous options
   $('#middleware-options').empty();
 
@@ -528,6 +602,10 @@ function addOptions(name, inst = null) {
   if (type === 'middleware' || type === 'protocol') {
     const factory = middlewareFactoryMap.get(name).factory;
     const instance = inst || factory();
+    let config = {};
+    if (typeof instance.getConfig === 'function') {
+      config = instance.getConfig();
+    }
     instance.name = name;
     instance.type = type;
     tempMiddlewareInstance = instance;
@@ -537,6 +615,7 @@ function addOptions(name, inst = null) {
     if (typeof instance.getOptions === 'function') {
       const options = instance.getOptions();
       _.map(option => {
+        const curval = config[option.name];
         if (option.type === 'select') {
           const elm = document.createElement('select');
           elm.setAttribute('name', option.name);
@@ -553,14 +632,42 @@ function addOptions(name, inst = null) {
           div.appendChild(label);
           $('#middleware-options').append(div);
           // 设置当前值
-          if (option.currentValue) {
-            elm.value = option.currentValue;
-          }
-        } else if (option.type === 'text') {
-
+          if (curval) elm.value = curval;
         } else if (option.type === 'check') {
-
-        } // ...
+          const label = $('<label>');
+          const check = $('<input type="checkbox" >').attr('name', option.name).attr('value', option.value);;
+          label.append(check).append(option.label);
+          const div = $('<div>');
+          div.append(label).appendTo('#middleware-options');
+          if (curval.indexOf(option.value) > -1) check[0].checked = true;
+        } else if (option.type === 'radio') {
+          const label = $('<label></label>');
+          const radio = $('<input type="radio" >').attr('name', option.name).attr('value', option.value);
+          label.append(radio).append(`${option.label}`);
+          const div = $('<div></div>');
+          div.append(label).appendTo('#middleware-options');
+          if (curval === option.value) radio[0].checked = true;
+        } else if (option.type === 'savefile') {
+          const text = $('<div>').css('max-width', '475px');
+          const btn = $(`<button name="${option.name}" data-type="savefile" data-value="" class="btn btn-mini btn-primary">选择文件...</button>`);
+          btn.click(e => dialog.showSaveDialog(BrowserWindow.getFocusedWindow(), null, filename=>{
+            if (filename) {
+              text.text(filename);
+              btn.attr('data-value', filename);
+            }
+          }));
+          const div = $('<div>');
+          div.append(btn).append(text).appendTo('#middleware-options');
+          text.text(curval);
+          btn.attr('data-value', curval);
+        } else if (option.type === 'text') {
+          const element = document.createElement('p');
+          element.innerHTML = option.content || '';
+          const div = document.createElement('div');
+          $(div).css('max-width', '475px');
+          div.appendChild(element);
+          $('#middleware-options').append(div);
+        }
       }, options);
     }
   }
@@ -579,14 +686,14 @@ function middlewareDoModal(cuid = null) {
     if (!tempMiddlewareInstance) tempMiddlewareInstance = postMiddlewareInstanceMap.get(cuid);
     if (!tempMiddlewareInstance) tempMiddlewareInstance = sendMiddlewareInstanceMap.get(cuid);
     $(header).append(`<label>更改中间件：${tempMiddlewareInstance.name}</label>`);
-    addOptions(tempMiddlewareInstance.name, tempMiddlewareInstance);
+    addMiddlewareOptions(tempMiddlewareInstance.name, tempMiddlewareInstance);
   } else {
     // 列出所有中间件的名字，供选择添加，选择某中间件后，列出其可配置选项
     document.getElementById('middleware-popup').setAttribute('data-operation', 'add');
     const selectElm = document.createElement('select');
     selectElm.addEventListener('change', (e)=>{
       const name = e.target.value;
-      addOptions(name);
+      addMiddlewareOptions(name);
     });
     // optgroup, 中间件选项分为三组
     const grpMiddleware = $(document.createElement('optgroup')).attr('label', 'middleware');
@@ -608,7 +715,7 @@ function middlewareDoModal(cuid = null) {
       if (firstOption !== null) {
         firstOption.selected = true;
         const name = firstOption.value;
-        addOptions(name);
+        addMiddlewareOptions(name);
       } else {
         document.querySelector('#middleware-popup .ok').disabled = true;
       }
@@ -667,6 +774,7 @@ function applyMiddleware() {
     }
   }, sendCuids);
   txHandlerSeq = makeSeq([...sendMiddleware, sendLast]);
+  loopbackSeq = makeSeq([...sendMiddleware, loopback]);
 }
 // 查找实例对象对应的map和instance
 function getInstanceByCuid(cuid) {
@@ -715,3 +823,36 @@ function statusbarSet(item, content) {
     $('footer [id$="count"]').text('0');
   }
 }
+
+// window / document 全局事件
+document.addEventListener('DOMContentLoaded', function () {
+  $('.titlebar-close').click(e=>{
+    window.close();
+  });
+  rxTextArea = document.querySelector('#textarea-rx');
+  basicSetupInit();
+  DOMEventInit();
+
+  let height = window.innerHeight - 160 - 24 - 10 - 44;
+  $('#rx-display-area').css('height', height);
+
+  importMiddleware();
+  applyMiddleware();
+  updateDOMSerialChange(false);
+
+  const packageStr = fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8');
+  const packageObj = JSON.parse(packageStr);
+  const version = packageObj.version;
+  $('#version').text(version);
+  $.getJSON('https://lcofjp.github.io/visual-serial/version.json')
+    .done(data => {
+      if (data.latest_version !== version) {
+        $('#version').html(`${version}(<span id="download-latest" 
+        style="cursor: pointer; color: blue;"></span>)`);
+        $('#download-latest').text(`下载${data.latest_version}`).show().click(e => {
+          shell.openExternal("https://www.github.com/lcofjp/visual-serial/");          
+        });
+      }
+    });
+
+});
